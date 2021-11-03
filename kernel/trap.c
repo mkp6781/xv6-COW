@@ -65,6 +65,12 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    uint64 faulting_addr = r_stval();
+    faulting_addr = PGROUNDDOWN(faulting_addr);
+    if((cow_pagefault_handler(p->pagetable, faulting_addr)) < 0){
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -81,6 +87,44 @@ usertrap(void)
     yield();
 
   usertrapret();
+}
+
+// Function handling the page fault triggered by COW mapping 
+int
+cow_pagefault_handler(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa, new_page;
+  uint flags;
+
+  pte = va2pte(pagetable, va);
+  if(!pte)
+    return -1;
+
+  // Check if PTE_C bit is set to 1.
+  if(!(*pte & PTE_C))
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  new_page = (uint64)kalloc();
+  if(!new_page){
+    return -1;
+  }
+
+  // Copy contents of existing page to the new page.
+  memmove((char *)new_page, (char *)pa, PGSIZE);
+  flags = flags & ~(PTE_C);
+  flags = flags | PTE_W;
+
+  // removing existing mapping for the page
+  uvmunmap(pagetable, PGROUNDDOWN(va), 1, 1);
+  if(mappages(pagetable, PGROUNDDOWN(va), PGSIZE, new_page, flags) != 0){
+    kfree((void *)new_page);
+    return -1;
+  }
+  
+  return 0;
 }
 
 //
